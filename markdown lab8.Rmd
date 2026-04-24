@@ -1,0 +1,139 @@
+---
+title: "Laboratorio 8 - Máquinas Vectoriales de Soporte (SVM)"
+author: "Jose Sanchez"
+date: "2026-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r librerias}
+library(tidyverse)
+library(e1071)
+library(caret)
+library(dplyr)
+library(ggplot2)
+```
+
+## 1. Conjuntos de entrenamiento y prueba
+
+Se utilizan los mismos conjuntos de entrenamiento y prueba definidos en hojas de trabajo anteriores, cargando el dataset `listings.RData` y aplicando la misma semilla y partición.
+
+```{r carga-datos}
+load("listings.RData")
+
+# Seleccionar variables relevantes y eliminar filas con NA
+listings_clean <- listings %>%
+  select(price, room_type, neighbourhood_group_cleansed,
+         accommodates, bathrooms, bedrooms, beds,
+         number_of_reviews, review_scores_rating,
+         availability_365, minimum_nights) %>%
+  drop_na()
+
+# Convertir price a numérico si viene como texto
+if (is.character(listings_clean$price)) {
+  listings_clean$price <- as.numeric(gsub("[$,]", "", listings_clean$price))
+}
+
+# Crear variable objetivo binaria: precio alto (>= mediana) o bajo (< mediana)
+mediana_precio <- median(listings_clean$price, na.rm = TRUE)
+listings_clean <- listings_clean %>%
+  mutate(precio_alto = factor(ifelse(price >= mediana_precio, "Alto", "Bajo"))) %>%
+  select(-price)
+
+# Misma semilla y partición que hojas anteriores
+set.seed(42)
+indice_train <- createDataPartition(listings_clean$precio_alto, p = 0.7, list = FALSE)
+datos_train <- listings_clean[indice_train, ]
+datos_test  <- listings_clean[-indice_train, ]
+
+cat("Registros en entrenamiento:", nrow(datos_train), "\n")
+cat("Registros en prueba:", nrow(datos_test), "\n")
+```
+
+---
+
+## 2. Exploración de datos y transformaciones para SVM
+
+### 2.1 Exploración general
+
+```{r exploracion-general}
+glimpse(listings_clean)
+summary(listings_clean)
+```
+
+### 2.2 Distribución de la variable objetivo
+
+```{r distribucion-objetivo}
+ggplot(listings_clean, aes(x = precio_alto, fill = precio_alto)) +
+  geom_bar() +
+  labs(title = "Distribución de clases: Precio Alto vs Bajo",
+       x = "Categoría de precio", y = "Frecuencia") +
+  theme_minimal()
+
+prop.table(table(listings_clean$precio_alto))
+```
+
+### 2.3 Distribución de variables numéricas
+
+```{r distribucion-numericas}
+listings_clean %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(x = valor)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = "Distribución de variables numéricas") +
+  theme_minimal()
+```
+
+### 2.4 Transformaciones necesarias para SVM
+
+Las SVMs son sensibles a la escala de las variables y requieren que las entradas sean numéricas. A continuación se describen y aplican las transformaciones necesarias:
+
+**a) Codificación de variables categóricas**
+Las variables `room_type` y `neighbourhood_group_cleansed` son categóricas. Se convierten a variables dummy (one-hot encoding) ya que SVM no puede trabajar directamente con factores.
+
+**b) Normalización / estandarización de variables numéricas**
+SVM calcula distancias entre puntos en el espacio de características. Si una variable tiene una escala mucho mayor que otra (p. ej. `number_of_reviews` vs `bedrooms`), dominará el cálculo del kernel y distorsionará los hiperplanos. Por ello se aplica estandarización (media 0, desviación estándar 1) con `preProcess`.
+
+**c) Eliminación de valores atípicos extremos**
+Variables como `minimum_nights` tienen valores extremadamente altos que pueden afectar la posición del hiperplano de separación. Se filtran percentiles extremos.
+
+**d) Balanceo de clases (si aplica)**
+Si las clases están desbalanceadas, la SVM puede sesgarse hacia la clase mayoritaria. Se verifica y, de ser necesario, se aplica submuestreo.
+
+```{r transformaciones}
+# Eliminar outliers extremos en minimum_nights
+datos_train <- datos_train %>%
+  filter(minimum_nights <= quantile(minimum_nights, 0.99))
+datos_test <- datos_test %>%
+  filter(minimum_nights <= quantile(minimum_nights, 0.99))
+
+# Preprocesamiento: estandarización y codificación dummy
+preprocesamiento <- preProcess(datos_train %>% select(-precio_alto),
+                               method = c("center", "scale"))
+
+train_transformado <- predict(preprocesamiento, datos_train)
+test_transformado  <- predict(preprocesamiento, datos_test)
+
+cat("Dimensiones del conjunto de entrenamiento transformado:",
+    dim(train_transformado), "\n")
+cat("Dimensiones del conjunto de prueba transformado:",
+    dim(test_transformado), "\n")
+```
+
+### 2.5 Verificación tras transformación
+
+```{r verificacion}
+# Verificar que las variables numéricas están centradas
+train_transformado %>%
+  select(where(is.numeric)) %>%
+  summarise(across(everything(), list(media = mean, sd = sd))) %>%
+  pivot_longer(everything(), names_to = "stat", values_to = "valor") %>%
+  print()
+```
+
+Con estas transformaciones el dataset está listo para entrenar un modelo SVM en los siguientes apartados del laboratorio.
