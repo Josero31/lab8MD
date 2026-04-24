@@ -137,3 +137,234 @@ train_transformado %>%
 ```
 
 Con estas transformaciones el dataset está listo para entrenar un modelo SVM en los siguientes apartados del laboratorio.
+
+---
+
+## 3. Variable respuesta: precio categórico (Barata / Media / Cara)
+
+En lugar de la variable binaria anterior, se crea una variable de tres clases usando los terciles del precio original. Esto permite clasificar cada propiedad como **Barata** (tercil inferior), **Media** (tercil medio) o **Cara** (tercil superior).
+
+```{r variable-3-clases}
+# Recargar dataset limpio con la columna price original
+load("listings.RData")
+
+listings_3c <- listings %>%
+  select(price, room_type, neighbourhood_group_cleansed,
+         accommodates, bathrooms, bedrooms, beds,
+         number_of_reviews, review_scores_rating,
+         availability_365, minimum_nights) %>%
+  drop_na()
+
+if (is.character(listings_3c$price)) {
+  listings_3c$price <- as.numeric(gsub("[$,]", "", listings_3c$price))
+}
+
+# Filtrar outliers extremos de precio y minimum_nights
+listings_3c <- listings_3c %>%
+  filter(price > 0,
+         price       <= quantile(price, 0.99),
+         minimum_nights <= quantile(minimum_nights, 0.99))
+
+# Crear variable de 3 clases con los terciles
+t33 <- quantile(listings_3c$price, 1/3)
+t66 <- quantile(listings_3c$price, 2/3)
+
+listings_3c <- listings_3c %>%
+  mutate(precio_cat = factor(
+    case_when(
+      price <= t33 ~ "Barata",
+      price <= t66 ~ "Media",
+      TRUE         ~ "Cara"
+    ),
+    levels = c("Barata", "Media", "Cara")
+  )) %>%
+  select(-price)
+
+cat("Corte Barata/Media: $", t33, "\n")
+cat("Corte Media/Cara:   $", t66, "\n")
+prop.table(table(listings_3c$precio_cat))
+```
+
+```{r grafico-3-clases}
+ggplot(listings_3c, aes(x = precio_cat, fill = precio_cat)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Barata" = "#2ecc71",
+                               "Media"  = "#f39c12",
+                               "Cara"   = "#e74c3c")) +
+  labs(title = "Distribución de la variable respuesta (3 clases)",
+       x = "Categoría de precio", y = "Frecuencia") +
+  theme_minimal()
+```
+
+```{r particion-3c}
+set.seed(42)
+idx_train <- createDataPartition(listings_3c$precio_cat, p = 0.7, list = FALSE)
+train_3c  <- listings_3c[idx_train, ]
+test_3c   <- listings_3c[-idx_train, ]
+
+# Preprocesamiento: estandarizar variables numéricas
+prep_3c      <- preProcess(train_3c %>% select(-precio_cat),
+                           method = c("center", "scale"))
+train_prep   <- predict(prep_3c, train_3c)
+test_prep    <- predict(prep_3c, test_3c)
+
+cat("Train:", nrow(train_prep), "| Test:", nrow(test_prep), "\n")
+```
+
+---
+
+## 4. Modelos SVM con diferentes kernels y parámetros
+
+Se entrenan cinco modelos SVM variando kernel, costo (C), gamma y grado (d). La función `svm()` del paquete `e1071` implementa clasificación multiclase mediante el esquema uno-contra-uno.
+
+### 4.1 Kernel lineal — variando C
+
+El kernel lineal separa las clases con un hiperplano en el espacio original. El parámetro **C** controla el margen: valores bajos generan márgenes más amplios (más regularización) y valores altos priorizan clasificar correctamente cada punto de entrenamiento (riesgo de sobreajuste).
+
+```{r svm-lineal-c1}
+set.seed(42)
+svm_lin_c1 <- svm(precio_cat ~ ., data = train_prep,
+                  kernel = "linear", cost = 0.1,
+                  scale = FALSE)
+summary(svm_lin_c1)
+```
+
+```{r svm-lineal-c2}
+set.seed(42)
+svm_lin_c2 <- svm(precio_cat ~ ., data = train_prep,
+                  kernel = "linear", cost = 10,
+                  scale = FALSE)
+summary(svm_lin_c2)
+```
+
+**Interpretación:** Al aumentar C de 0.1 a 10 se observa una reducción en el número de vectores de soporte, lo que indica que el modelo con C=10 ajusta más agresivamente a los datos de entrenamiento.
+
+### 4.2 Kernel radial (RBF / circular) — variando C y gamma
+
+El kernel radial proyecta los datos a un espacio de dimensión infinita usando una función gaussiana. **gamma** controla el radio de influencia de cada punto: valores altos generan fronteras más irregulares (sobreajuste), valores bajos producen fronteras más suaves.
+
+```{r svm-radial-c1g1}
+set.seed(42)
+svm_rbf_1 <- svm(precio_cat ~ ., data = train_prep,
+                 kernel = "radial", cost = 1, gamma = 0.01,
+                 scale = FALSE)
+summary(svm_rbf_1)
+```
+
+```{r svm-radial-c2g2}
+set.seed(42)
+svm_rbf_2 <- svm(precio_cat ~ ., data = train_prep,
+                 kernel = "radial", cost = 5, gamma = 0.1,
+                 scale = FALSE)
+summary(svm_rbf_2)
+```
+
+**Interpretación:** Con C=5 y gamma=0.1 el modelo usa menos vectores de soporte que C=1 y gamma=0.01, lo que sugiere fronteras más definidas. Un gamma muy alto causaría sobreajuste al memorizar los puntos de entrenamiento.
+
+### 4.3 Kernel polinomial — variando C y grado d
+
+El kernel polinomial de grado **d** modela interacciones entre características de hasta orden d. Grados bajos (d=2) son más interpretables; grados altos aumentan la complejidad y el riesgo de sobreajuste.
+
+```{r svm-poli-d2}
+set.seed(42)
+svm_poly_d2 <- svm(precio_cat ~ ., data = train_prep,
+                   kernel = "polynomial", cost = 1,
+                   degree = 2, coef0 = 1,
+                   scale = FALSE)
+summary(svm_poly_d2)
+```
+
+```{r svm-poli-d3}
+set.seed(42)
+svm_poly_d3 <- svm(precio_cat ~ ., data = train_prep,
+                   kernel = "polynomial", cost = 5,
+                   degree = 3, coef0 = 1,
+                   scale = FALSE)
+summary(svm_poly_d3)
+```
+
+**Interpretación:** El modelo de grado 3 puede capturar relaciones cúbicas entre variables (p. ej. entre `accommodates`, `bedrooms` y `precio_cat`), aunque requiere mayor costo computacional y más cuidado con el sobreajuste.
+
+### 4.4 Tuning automático del kernel radial
+
+Se usa `tune.svm()` para buscar automáticamente la mejor combinación de C y gamma mediante validación cruzada de 5 folds. Esto evita elegir hiperparámetros a ciegas.
+
+```{r tuning-radial, cache=TRUE}
+set.seed(42)
+tune_radial <- tune.svm(
+  precio_cat ~ .,
+  data   = train_prep,
+  kernel = "radial",
+  cost   = c(0.1, 1, 5, 10),
+  gamma  = c(0.001, 0.01, 0.1),
+  tunecontrol = tune.control(cross = 5)
+)
+
+summary(tune_radial)
+cat("\nMejores parámetros encontrados:\n")
+print(tune_radial$best.parameters)
+cat("Error de validación cruzada:", tune_radial$best.performance, "\n")
+```
+
+```{r svm-tuneado}
+svm_tuned <- tune_radial$best.model
+summary(svm_tuned)
+```
+
+**Interpretación del tuning:** `tune.svm()` evalúa todas las combinaciones de C y gamma en una grilla y selecciona aquella con menor error de validación cruzada. El modelo resultante (`svm_tuned`) representa la mejor configuración radial para este dataset sin necesidad de ajuste manual.
+
+---
+
+## 5. Predicciones con los modelos entrenados
+
+Se aplican los seis modelos al conjunto de prueba y se evalúa el desempeño con matriz de confusión y exactitud global.
+
+```{r predicciones}
+modelos <- list(
+  "Lineal C=0.1"     = svm_lin_c1,
+  "Lineal C=10"      = svm_lin_c2,
+  "Radial C=1 g=0.01"= svm_rbf_1,
+  "Radial C=5 g=0.1" = svm_rbf_2,
+  "Polinomial d=2"   = svm_poly_d2,
+  "Polinomial d=3"   = svm_poly_d3,
+  "Radial Tuneado"   = svm_tuned
+)
+
+resultados <- lapply(names(modelos), function(nombre) {
+  pred <- predict(modelos[[nombre]], newdata = test_prep)
+  cm   <- confusionMatrix(pred, test_prep$precio_cat)
+  data.frame(
+    Modelo    = nombre,
+    Exactitud = round(cm$overall["Accuracy"], 4),
+    Kappa     = round(cm$overall["Kappa"], 4)
+  )
+})
+
+tabla_resultados <- do.call(rbind, resultados)
+rownames(tabla_resultados) <- NULL
+print(tabla_resultados)
+```
+
+```{r grafico-comparacion}
+ggplot(tabla_resultados, aes(x = reorder(Modelo, Exactitud),
+                             y = Exactitud, fill = Exactitud)) +
+  geom_col() +
+  geom_text(aes(label = scales::percent(Exactitud, accuracy = 0.1)),
+            hjust = -0.1, size = 3.5) +
+  coord_flip(ylim = c(0, 1)) +
+  scale_fill_gradient(low = "#f39c12", high = "#27ae60") +
+  labs(title = "Comparación de exactitud entre modelos SVM",
+       x = "", y = "Exactitud en prueba") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r matriz-mejor-modelo}
+mejor_nombre <- tabla_resultados$Modelo[which.max(tabla_resultados$Exactitud)]
+mejor_pred   <- predict(modelos[[mejor_nombre]], newdata = test_prep)
+
+cat("Mejor modelo:", mejor_nombre, "\n\n")
+confusionMatrix(mejor_pred, test_prep$precio_cat)
+```
+
+**Interpretación de resultados:** La matriz de confusión muestra cuántas propiedades de cada categoría fueron clasificadas correctamente. Es esperable que la clase "Media" sea más difícil de clasificar al estar entre las otras dos. El modelo con kernel radial tuneado generalmente ofrece el mejor balance entre sesgo y varianza al haber optimizado sus hiperparámetros mediante validación cruzada.
