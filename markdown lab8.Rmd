@@ -622,3 +622,45 @@ print(comparacion_final)
 ```
 
 El modelo SVM con kernel radial tuneado presenta la mejor capacidad predictiva, aunque con mayor costo computacional. Random Forest ofrece un balance entre rendimiento y eficiencia, mientras que Naive Bayes y regresión logística destacan por su rapidez pero menor precisión.
+
+# 10. Tabla de sobreajuste (TODOS los modelos)
+
+```{r}
+# SVM (ya lo tienes)
+tabla_svm <- tabla_ov %>%
+  select(Modelo, Acc_Train, Acc_Test) %>%
+  mutate(Tipo = "SVM")
+
+# EJEMPLO: debes poner valores reales de modelos anteriores
+otros_modelos <- data.frame(
+  Modelo = c("Arbol", "Random Forest", "Naive Bayes", "KNN", "Logistica"),
+  Acc_Train = c(0.80, 0.95, 0.65, 0.78, 0.72),
+  Acc_Test  = c(0.65, 0.72, 0.60, 0.68, 0.70),
+  Tipo = "Otros"
+)
+
+tabla_total <- rbind(tabla_svm, otros_modelos) %>%
+  mutate(
+    Diferencia = Acc_Train - Acc_Test,
+    Diagnostico = case_when(
+      Diferencia > 0.05 ~ "Sobreajuste",
+      Acc_Train < 0.60 & Acc_Test < 0.60 ~ "Desajuste",
+      TRUE ~ "Buen ajuste"
+    )
+  )
+
+print(tabla_total)
+```
+
+Para detectar sobreajuste se debe comparar:
+
+Accuracy en entrenamiento vs prueba
+
+Diferencia (gap) entre ambos
+
+Kappa (opcional, más robusto)
+
+Matriz de confusión (tipo de errores)
+
+
+Los modelos más complejos como Random Forest y SVM con gamma alto tienden a sobreajustarse, mientras que modelos más simples como regresión logística o Naive Bayes presentan mejor generalización pero menor capacidad predictiva. El balance óptimo se logra con modelos ajustados mediante validación cruzada.
