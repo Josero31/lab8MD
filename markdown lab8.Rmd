@@ -548,3 +548,53 @@ for (i in seq_len(nrow(tabla_ov))) {
               tabla_ov$Diagnostico[i]))
 }
 ```
+
+# 8. Comparación: efectividad, tiempo y errores
+
+```{r}
+library(tictoc)
+
+comparacion_detallada <- lapply(names(modelos), function(nombre) {
+  
+  modelo <- modelos[[nombre]]
+  
+  # Tiempo
+  t0 <- Sys.time()
+  pred <- predict(modelo, newdata = test_prep)
+  t1 <- Sys.time()
+  
+  tiempo <- as.numeric(difftime(t1, t0, units = "secs"))
+  
+  cm <- confusionMatrix(pred, test_prep$precio_cat)
+  
+  acc <- cm$overall["Accuracy"]
+  kap <- cm$overall["Kappa"]
+  
+  # Evitar NULLs
+  if (is.null(acc)) acc <- NA
+  if (is.null(kap)) kap <- NA
+  
+  data.frame(
+    Modelo = nombre,
+    Exactitud = as.numeric(acc),
+    Kappa = as.numeric(kap),
+    Tiempo_seg = round(tiempo, 4),
+    Error_Total = 1 - as.numeric(acc)
+  )
+})
+tabla_comp8 <- do.call(rbind, comparacion_detallada)
+rownames(tabla_comp8) <- NULL
+print(tabla_comp8)
+```
+Efectividad:
+Se compara con Accuracy y Kappa. El modelo radial tuneado es el mejor porque optimiza hiperparámetros.
+
+Tiempo de procesamiento:
+Kernel lineal es más rápido. Kernel radial es más lento. 
+Tuneado es más costoso (por validación cruzada). 
+
+Errores (muy importante):
+La clase "Media" suele tener más errores (zona intermedia). 
+Confundir Cara con Barata es más grave que errores con “Media”. 
+Esto tiene impacto en negocio (mal pricing). 
+
