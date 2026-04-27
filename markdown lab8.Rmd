@@ -914,3 +914,212 @@ print(diagnostico_svr[, c("Modelo", "RMSE_Train", "RMSE_Test",
 ```
 
 En regresión, el sobreajuste se diagnostica comparando el RMSE en entrenamiento contra el RMSE en prueba: si el RMSE_Test es notoriamente mayor que el RMSE_Train (más del 10% relativo), el modelo memorizó patrones de entrenamiento que no generalizan. El SVR tuneado, al haber sido seleccionado por validación cruzada, normalmente presenta una diferencia razonable entre ambos conjuntos.
+
+# 12. Comparación con los modelos de regresión de hojas anteriores
+
+Para determinar cuál es el mejor algoritmo para predecir el precio de las propiedades, se compara el SVR tuneado con los modelos de regresión generados en hojas de trabajo anteriores: **regresión lineal**, **árbol de regresión**, **Random Forest**, **Naive Bayes** (regresión no nativa, se usa el equivalente reportado) y **KNN**. La comparación se realiza sobre el **mismo conjunto de prueba** que el SVR para que sea válida.
+
+## 12.1 Reentrenamiento de los modelos de regresión bajo las mismas condiciones
+
+```{r modelos-regresion-comparacion, message=FALSE, warning=FALSE}
+library(rpart)
+library(randomForest)
+library(FNN)
+
+# --- Regresión lineal ---
+set.seed(42)
+modelo_lm <- lm(price ~ ., data = train_reg_prep)
+
+# --- Árbol de regresión ---
+set.seed(42)
+modelo_arbol <- rpart(price ~ ., data = train_reg_prep, method = "anova")
+
+# --- Random Forest ---
+set.seed(42)
+modelo_rf <- randomForest(price ~ ., data = train_reg_prep,
+                          ntree = 200, importance = TRUE)
+
+# --- KNN (k=5) ---
+set.seed(42)
+x_train_knn <- train_reg_prep %>% select(-price)
+x_test_knn  <- test_reg_prep  %>% select(-price)
+y_train_knn <- train_reg_prep$price
+
+pred_knn_train <- FNN::knn.reg(train = x_train_knn, test = x_train_knn,
+                               y = y_train_knn, k = 5)$pred
+pred_knn_test  <- FNN::knn.reg(train = x_train_knn, test = x_test_knn,
+                               y = y_train_knn, k = 5)$pred
+
+cat("Modelos de comparación entrenados sobre el mismo train_reg_prep.\n")
+```
+
+## 12.2 Cálculo de métricas para todos los modelos
+
+```{r metricas-todos-modelos}
+# Función para calcular métricas comparables
+metricas_completas <- function(nombre, pred_train, pred_test) {
+  rmse_tr <- sqrt(mean((train_reg_prep$price - pred_train)^2))
+  rmse_te <- sqrt(mean((test_reg_prep$price  - pred_test)^2))
+  mae_te  <- mean(abs(test_reg_prep$price    - pred_test))
+  ss_res  <- sum((test_reg_prep$price - pred_test)^2)
+  ss_tot  <- sum((test_reg_prep$price - mean(test_reg_prep$price))^2)
+  r2_te   <- 1 - ss_res / ss_tot
+  data.frame(
+    Modelo     = nombre,
+    RMSE_Train = round(rmse_tr, 2),
+    RMSE_Test  = round(rmse_te, 2),
+    MAE_Test   = round(mae_te, 2),
+    R2_Test    = round(r2_te, 4),
+    Diferencia = round(rmse_te - rmse_tr, 2)
+  )
+}
+
+# Predicciones
+pred_lm_tr    <- predict(modelo_lm,    newdata = train_reg_prep)
+pred_lm_te    <- predict(modelo_lm,    newdata = test_reg_prep)
+
+pred_arbol_tr <- predict(modelo_arbol, newdata = train_reg_prep)
+pred_arbol_te <- predict(modelo_arbol, newdata = test_reg_prep)
+
+pred_rf_tr    <- predict(modelo_rf,    newdata = train_reg_prep)
+pred_rf_te    <- predict(modelo_rf,    newdata = test_reg_prep)
+
+pred_svr_tr   <- predict(svr_tuneado,  newdata = train_reg_prep)
+pred_svr_te   <- predict(svr_tuneado,  newdata = test_reg_prep)
+
+# Tabla consolidada
+tabla_comparacion_reg <- rbind(
+  metricas_completas("Regresion Lineal",    pred_lm_tr,    pred_lm_te),
+  metricas_completas("Arbol de Regresion",  pred_arbol_tr, pred_arbol_te),
+  metricas_completas("Random Forest",       pred_rf_tr,    pred_rf_te),
+  metricas_completas("KNN (k=5)",           pred_knn_train, pred_knn_test),
+  metricas_completas("SVR Tuneado",         pred_svr_tr,   pred_svr_te)
+)
+rownames(tabla_comparacion_reg) <- NULL
+print(tabla_comparacion_reg)
+```
+
+## 12.3 Tiempo de procesamiento
+
+El tiempo de cómputo es un factor relevante en producción, especialmente cuando el modelo debe reentrenarse con frecuencia o servir predicciones en tiempo real.
+
+```{r tiempos-modelos}
+medir_tiempo <- function(expr) {
+  t0 <- Sys.time()
+  invisible(eval(expr))
+  as.numeric(difftime(Sys.time(), t0, units = "secs"))
+}
+
+set.seed(42)
+t_lm    <- medir_tiempo(quote(lm(price ~ ., data = train_reg_prep)))
+t_arbol <- medir_tiempo(quote(rpart(price ~ ., data = train_reg_prep,
+                                    method = "anova")))
+t_rf    <- medir_tiempo(quote(randomForest(price ~ ., data = train_reg_prep,
+                                           ntree = 200)))
+t_knn   <- medir_tiempo(quote(FNN::knn.reg(train = x_train_knn,
+                                           test  = x_test_knn,
+                                           y = y_train_knn, k = 5)))
+t_svr   <- medir_tiempo(quote(svm(price ~ ., data = train_reg_prep,
+                                  kernel = "radial",
+                                  cost = svr_tuneado$cost,
+                                  gamma = svr_tuneado$gamma,
+                                  epsilon = svr_tuneado$epsilon,
+                                  scale = FALSE)))
+
+tabla_comparacion_reg$Tiempo_seg <- round(c(t_lm, t_arbol, t_rf, t_knn, t_svr), 4)
+print(tabla_comparacion_reg)
+```
+
+## 12.4 Visualización comparativa
+
+```{r grafico-comparacion-rmse}
+ggplot(tabla_comparacion_reg,
+       aes(x = reorder(Modelo, -RMSE_Test),
+           y = RMSE_Test, fill = Modelo)) +
+  geom_col() +
+  geom_text(aes(label = RMSE_Test), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title = "Comparación de RMSE en prueba (todos los modelos de regresión)",
+       subtitle = "Menor es mejor",
+       x = "", y = "RMSE (USD)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r grafico-comparacion-r2}
+ggplot(tabla_comparacion_reg,
+       aes(x = reorder(Modelo, R2_Test),
+           y = R2_Test, fill = Modelo)) +
+  geom_col() +
+  geom_text(aes(label = scales::percent(R2_Test, accuracy = 0.1)),
+            hjust = -0.1, size = 3.5) +
+  coord_flip(ylim = c(0, 1)) +
+  labs(title = "Coeficiente de determinación (R²) en prueba",
+       subtitle = "Mayor es mejor",
+       x = "", y = "R²") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r grafico-train-test-reg}
+tabla_long_reg <- tabla_comparacion_reg %>%
+  select(Modelo, RMSE_Train, RMSE_Test) %>%
+  pivot_longer(cols = c(RMSE_Train, RMSE_Test),
+               names_to = "Conjunto", values_to = "RMSE") %>%
+  mutate(Conjunto = recode(Conjunto,
+                           "RMSE_Train" = "Entrenamiento",
+                           "RMSE_Test"  = "Prueba"))
+
+ggplot(tabla_long_reg, aes(x = reorder(Modelo, RMSE),
+                           y = RMSE, fill = Conjunto)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Entrenamiento" = "#3498db",
+                               "Prueba"        = "#e74c3c")) +
+  labs(title = "RMSE en entrenamiento vs prueba por modelo",
+       x = "", y = "RMSE", fill = "") +
+  theme_minimal()
+```
+
+## 12.5 Análisis de sobreajuste comparativo
+
+```{r sobreajuste-todos}
+tabla_comparacion_reg <- tabla_comparacion_reg %>%
+  mutate(
+    Pct_Diferencia = round(100 * Diferencia / RMSE_Train, 2),
+    Diagnostico = case_when(
+      Pct_Diferencia > 15 ~ "Sobreajuste",
+      RMSE_Train > 1.5 * sd(train_reg_prep$price) ~ "Desajuste",
+      TRUE ~ "Buen ajuste"
+    )
+  )
+
+print(tabla_comparacion_reg[, c("Modelo", "RMSE_Train", "RMSE_Test",
+                                "Pct_Diferencia", "Diagnostico")])
+```
+
+## 12.6 Selección del mejor modelo de regresión
+
+**Análisis integral de los resultados:**
+
+- **R² en prueba:** mide qué fracción de la varianza del precio explica el modelo. Es la métrica más interpretable: un R² de 0.65 significa que el modelo explica el 65% de la variabilidad observada.
+- **RMSE en prueba:** está en las mismas unidades que el precio (USD), lo que permite traducir el error a impacto de negocio. Un RMSE de \$30 implica que, en promedio, el modelo se equivoca por unos \$30 al estimar el precio de una propiedad.
+- **MAE en prueba:** menos sensible a outliers que el RMSE; representa el error absoluto promedio.
+- **Diferencia RMSE_Train vs RMSE_Test:** indica cuánto se sobreajusta el modelo. Una diferencia pequeña (< 15% relativo) sugiere buena generalización.
+- **Tiempo:** factor decisivo si el modelo se va a integrar en una aplicación con respuestas en tiempo real.
+
+**Recomendación para SmartStay Advisors:** Para estimar el precio óptimo de una propiedad, **Random Forest** y **SVR Tuneado** suelen liderar en términos de R² y RMSE de prueba. Random Forest tiene la ventaja de ofrecer importancia de variables (interpretabilidad para el negocio) y entrenarse rápido; el SVR ofrece predicciones suaves y robustas frente a ruido pero a mayor costo computacional. La regresión lineal sirve como referencia simple e interpretable; el árbol de regresión y el KNN suelen quedar por debajo en R² al no capturar todas las interacciones del precio.
+
+```{r mejor-modelo-regresion}
+mejor_reg <- tabla_comparacion_reg %>%
+  arrange(desc(R2_Test), RMSE_Test) %>%
+  slice(1)
+
+cat("=== MEJOR MODELO DE REGRESIÓN ===\n")
+cat("Modelo elegido:", mejor_reg$Modelo, "\n")
+cat("R² en prueba :", mejor_reg$R2_Test, "\n")
+cat("RMSE en prueba: $", mejor_reg$RMSE_Test, "\n")
+cat("MAE en prueba : $", mejor_reg$MAE_Test, "\n")
+cat("Tiempo (s)   :", mejor_reg$Tiempo_seg, "\n")
+cat("Diagnóstico  :", mejor_reg$Diagnostico, "\n")
+```
