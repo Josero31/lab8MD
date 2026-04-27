@@ -1123,3 +1123,73 @@ cat("MAE en prueba : $", mejor_reg$MAE_Test, "\n")
 cat("Tiempo (s)   :", mejor_reg$Tiempo_seg, "\n")
 cat("Diagnóstico  :", mejor_reg$Diagnostico, "\n")
 ```
+
+# 13. Informe final de resultados y conclusiones
+
+A lo largo de este laboratorio se han abordado los dos problemas centrales que SmartStay Advisors necesita resolver para optimizar su servicio de intermediación: **clasificar las propiedades por nivel de precio** (Barata, Media, Cara) y **estimar el precio competitivo** de cada propiedad. A continuación se sintetizan los hallazgos y se establecen las recomendaciones derivadas del análisis con Máquinas Vectoriales de Soporte y la comparación con los algoritmos previos.
+
+## 13.1 Síntesis del trabajo de clasificación
+
+El problema de clasificación se resolvió creando una variable de tres clases mediante los terciles del precio. Antes de entrenar los modelos SVM se realizaron transformaciones cruciales: **codificación dummy** de las variables categóricas (`room_type`, `neighbourhood_group_cleansed`), **estandarización** de las variables numéricas para evitar que las de mayor escala dominaran el cálculo del kernel, y **filtrado de outliers** en `minimum_nights` y `price` para reducir el sesgo del hiperplano.
+
+Se entrenaron siete modelos SVM combinando tres kernels (lineal, radial, polinomial) con distintos valores de los hiperparámetros C, γ y d, e incluyendo un modelo radial tuneado mediante validación cruzada. El **kernel radial tuneado** fue consistentemente el más efectivo, seguido del kernel radial con C=5 y γ=0.1. Los kernels lineales sirvieron como referencia: sus resultados similares en entrenamiento y prueba indican que el problema admite cierta solución lineal, aunque incorporar no linealidad mejora la exactitud.
+
+En la matriz de confusión se observó el patrón esperado: la clase **"Media"** concentra la mayor parte de los errores porque su frontera con las clases "Barata" y "Cara" es difusa. Confundir una propiedad **Cara con Barata** (o viceversa) representa el error más costoso para el negocio, ya que implica recomendar un precio muy alejado del mercado y, por tanto, perder ocupación o ingresos. Los modelos SVM bien tuneados minimizan precisamente este tipo de errores de "salto de clase".
+
+## 13.2 Síntesis del trabajo de regresión
+
+Para predecir el precio numérico se compararon cinco familias de modelos (regresión lineal, árbol de regresión, Random Forest, KNN y SVR) bajo idénticas condiciones: misma semilla, misma partición 70/30, mismo preprocesamiento. El **SVR tuneado** y **Random Forest** lideraron las métricas de R² y RMSE de prueba, mientras que la regresión lineal y el árbol de regresión quedaron por debajo al no capturar interacciones complejas. KNN ofreció un desempeño intermedio pero penalizado por la sensibilidad a la escala y al k elegido.
+
+El tuneo del SVR con `tune.svm()` (cost, gamma, epsilon) permitió encontrar un punto de operación que balancea sesgo y varianza. El parámetro **epsilon** resultó especialmente útil al definir el ancho del tubo de tolerancia, lo que confiere robustez a la SVR frente a ruido propio del mercado de Airbnb (precios atípicos, propiedades con tarifas especiales).
+
+## 13.3 Análisis de sobreajuste
+
+Para diagnosticar sobreajuste en los modelos de **clasificación** se compararon Accuracy en entrenamiento contra Accuracy en prueba; cuando la diferencia superaba 0.05 se consideraba sobreajuste. En **regresión** la métrica análoga fue la diferencia relativa de RMSE entre ambos conjuntos (umbral del 15%).
+
+Los modelos más complejos (Random Forest con árboles profundos, SVM con γ alto, SVR sin tunear) son más propensos al sobreajuste; los modelos más simples (regresión lineal, regresión logística, Naive Bayes) tienden al desajuste pero generalizan de forma estable. El uso de **validación cruzada** durante el tuneo es la herramienta más efectiva para encontrar el punto medio: penaliza implícitamente las configuraciones que solo aprenden los datos de entrenamiento.
+
+## 13.4 Tabla resumen de modelos hasta el momento
+
+```{r tabla-resumen-final}
+# Resumen integrado de los modelos de clasificación (basado en tabla_total del inciso 10)
+cat("=== RESUMEN GENERAL DE MODELOS ===\n\n")
+
+cat(">>> CLASIFICACIÓN (variable: Barata / Media / Cara)\n")
+print(tabla_total)
+
+cat("\n>>> REGRESIÓN (variable: precio en USD)\n")
+print(tabla_comparacion_reg[, c("Modelo", "RMSE_Train", "RMSE_Test",
+                                "R2_Test", "MAE_Test", "Tiempo_seg",
+                                "Diagnostico")])
+```
+
+## 13.5 Recomendaciones de negocio para SmartStay Advisors
+
+A partir de los resultados obtenidos, se derivan las siguientes recomendaciones operativas:
+
+**1. Modelo en producción para estimar precios:** Implementar el **SVR tuneado** o **Random Forest** según el costo computacional disponible. Random Forest es preferible si SmartStay necesita reentrenar el modelo con frecuencia (datos diarios) y entender qué variables impulsan el precio (importancia de variables). El SVR es preferible cuando se prioriza suavidad de predicciones y robustez frente a outliers.
+
+**2. Modelo en producción para clasificar propiedades:** Utilizar el **SVM con kernel radial tuneado** para etiquetar nuevas propiedades como Barata, Media o Cara. La etiqueta sirve para ofrecer al cliente una segmentación rápida del catálogo y para identificar propiedades en la frontera (clase "Media") que pueden moverse a categorías superiores con ajustes de tarifa.
+
+**3. Identificación de propiedades con baja ocupación:** Las propiedades cuya tarifa real esté significativamente por encima del precio predicho por el modelo de regresión son candidatas a una recomendación de **bajada de precio**. Esto activa los incentivos económicos de Airbnb por elevar la ocupación de propiedades de bajo desempeño.
+
+**4. Estrategia de pricing dinámico:** Combinar las predicciones del SVR con las estimaciones de ocupación (predicciones temporales que se desarrollarán en hojas posteriores) para sugerir un **precio de equilibrio**: aquel que maximiza ingresos sin sacrificar ocupación.
+
+**5. Monitoreo continuo del modelo:** Toda decisión basada en estos modelos debe acompañarse de monitoreo de **drift**: comparar periódicamente el RMSE/Accuracy en datos nuevos contra los obtenidos en este laboratorio. Si las métricas se deterioran, es momento de reentrenar.
+
+## 13.6 Limitaciones y trabajo futuro
+
+Las principales limitaciones del análisis son:
+
+- **Tamaño muestral acotado:** El conjunto se redujo a 2,000 registros para que el tuneo de SVM/SVR fuera computacionalmente viable. Con más recursos, ampliar la muestra mejoraría la generalización, especialmente para vecindarios con pocas observaciones.
+- **Variables disponibles:** No se incorporaron variables temporales (estacionalidad, eventos), reseñas en texto (sentimiento) ni geolocalización fina (latitud/longitud). Estas tienen un peso importante en el precio real y son una vía de mejora.
+- **Tratamiento de la heterocedasticidad:** Los residuos del SVR muestran mayor dispersión en precios altos. Aplicar una transformación logarítmica al precio (`log(price)`) y comparar resultados sería un paso natural a explorar.
+- **Validación temporal:** Idealmente la partición debería respetar el orden cronológico (entrenar con datos antiguos, probar con datos nuevos) para simular condiciones reales de despliegue.
+
+## 13.7 Cierre
+
+El estudio confirma que las **Máquinas Vectoriales de Soporte** son una herramienta competitiva para los dos problemas planteados por SmartStay Advisors. Su fortaleza principal radica en el manejo de fronteras no lineales mediante kernels y en la posibilidad de tunear el balance sesgo-varianza con C, γ y ε. No obstante, el desempeño superior depende de un **preprocesamiento riguroso** (estandarización, codificación dummy, control de outliers) y de un **tuneo basado en validación cruzada**, sin los cuales el modelo puede caer fácilmente en sobreajuste o desajuste.
+
+Frente a los algoritmos previos, el SVM/SVR tuneado se posiciona en el grupo de mayor exactitud junto a Random Forest, ofreciendo una alternativa robusta cuando se prioriza la calidad de la frontera de decisión sobre la interpretabilidad. La elección final entre uno y otro debe responder a las necesidades operativas: rapidez de inferencia, frecuencia de reentrenamiento e interpretabilidad demandada por el cliente.
+
+Con esta sexta entrega, SmartStay Advisors dispone de un portafolio de modelos suficientemente diverso y validado como para construir un servicio de recomendación de precios y clasificación de propiedades alineado con sus objetivos de rentabilidad e incremento de ocupación.
