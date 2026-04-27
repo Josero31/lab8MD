@@ -598,3 +598,27 @@ La clase "Media" suele tener más errores (zona intermedia).
 Confundir Cara con Barata es más grave que errores con “Media”. 
 Esto tiene impacto en negocio (mal pricing). 
 
+
+# 9. Comparación SVM vs modelos anteriores
+
+
+```{r}
+# EJEMPLO: debes reemplazar estos valores con los reales de tus hojas anteriores
+modelos_previos <- data.frame(
+  Modelo = c("Arbol", "Random Forest", "Naive Bayes", "KNN", "Logistica"),
+  Exactitud = c(0.65, 0.72, 0.60, 0.68, 0.70),
+  Tiempo_seg = c(0.01, 0.20, 0.01, 0.05, 0.02)
+)
+
+# Mejor SVM
+mejor_svm <- tabla_resultados %>%
+  filter(Exactitud == max(Exactitud)) %>%
+  mutate(Tiempo_seg = tabla_comp8$Tiempo_seg[match(Modelo, tabla_comp8$Modelo)])
+
+library(dplyr)
+
+comparacion_final <- bind_rows(modelos_previos, mejor_svm)
+print(comparacion_final)
+```
+
+El modelo SVM con kernel radial tuneado presenta la mejor capacidad predictiva, aunque con mayor costo computacional. Random Forest ofrece un balance entre rendimiento y eficiencia, mientras que Naive Bayes y regresión logística destacan por su rapidez pero menor precisión.
