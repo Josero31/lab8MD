@@ -240,6 +240,10 @@ dummy_recipe <- dummyVars(precio_cat ~ ., data = listings_3c, fullRank = TRUE)
 train_dummy  <- predict(dummy_recipe, newdata = train_3c) |> as.data.frame()
 test_dummy   <- predict(dummy_recipe, newdata = test_3c)  |> as.data.frame()
 
+# Limpiar nombres de columnas (espacios -> puntos) para evitar errores de fórmula
+colnames(train_dummy) <- make.names(colnames(train_dummy))
+colnames(test_dummy)  <- make.names(colnames(test_dummy))
+
 # Estandarizar todas las columnas (ahora todas son numéricas)
 prep_3c    <- preProcess(train_dummy, method = c("center", "scale"))
 train_prep <- cbind(predict(prep_3c, train_dummy), precio_cat = train_3c$precio_cat)
@@ -552,8 +556,6 @@ for (i in seq_len(nrow(tabla_ov))) {
 # 8. Comparación: efectividad, tiempo y errores
 
 ```{r}
-library(tictoc)
-
 comparacion_detallada <- lapply(names(modelos), function(nombre) {
   
   modelo <- modelos[[nombre]]
@@ -664,3 +666,251 @@ Matriz de confusión (tipo de errores)
 
 
 Los modelos más complejos como Random Forest y SVM con gamma alto tienden a sobreajustarse, mientras que modelos más simples como regresión logística o Naive Bayes presentan mejor generalización pero menor capacidad predictiva. El balance óptimo se logra con modelos ajustados mediante validación cruzada.
+
+# 11. Modelo de regresión SVR para el precio
+
+Hasta este punto el análisis se ha centrado en clasificar las propiedades en tres categorías de precio (Barata, Media, Cara). En esta sección se aborda el problema desde una perspectiva diferente: predecir el **precio exacto** de cada propiedad usando una **Máquina Vectorial de Soporte para Regresión (SVR)**. La SVR busca una función que se aproxime a los valores reales con un margen de tolerancia ε, penalizando únicamente los errores que excedan dicho margen.
+
+## 11.1 Preparación del conjunto de datos para regresión
+
+Para garantizar una comparación válida con los modelos de hojas de trabajo anteriores (regresión lineal, árbol de regresión, Random Forest, KNN), se reutiliza la misma semilla y la misma partición 70/30. La variable respuesta es ahora `price` numérica, sin transformarla a categorías.
+
+```{r preparacion-svr}
+# Recargar el dataset original para usar el precio como variable continua
+load("listings.RData")
+
+columnas_deseadas_reg <- c("price", "room_type", "neighbourhood_group_cleansed",
+                           "accommodates", "bathrooms", "bedrooms", "beds",
+                           "number_of_reviews", "review_scores_rating",
+                           "availability_365", "minimum_nights")
+columnas_ok_reg <- intersect(columnas_deseadas_reg, names(listings))
+
+listings_reg <- listings %>%
+  select(all_of(columnas_ok_reg)) %>%
+  drop_na()
+
+# Limpiar la variable price si viene como cadena
+if (is.character(listings_reg$price)) {
+  listings_reg$price <- as.numeric(gsub("[$,]", "", listings_reg$price))
+}
+listings_reg$price <- as.numeric(listings_reg$price)
+
+# Filtrar precios inválidos y outliers extremos del 1% superior
+listings_reg <- listings_reg %>%
+  filter(price > 0,
+         price <= quantile(price, 0.99, na.rm = TRUE))
+
+if ("minimum_nights" %in% names(listings_reg)) {
+  listings_reg <- listings_reg %>%
+    filter(minimum_nights <= quantile(minimum_nights, 0.99, na.rm = TRUE))
+}
+
+cat("Registros disponibles para regresión:", nrow(listings_reg), "\n")
+cat("Rango de precios: $", min(listings_reg$price), "-",
+    max(listings_reg$price), "\n")
+cat("Precio promedio: $", round(mean(listings_reg$price), 2), "\n")
+```
+
+```{r distribucion-precio}
+ggplot(listings_reg, aes(x = price)) +
+  geom_histogram(bins = 40, fill = "#3498db", color = "white") +
+  geom_vline(xintercept = mean(listings_reg$price),
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(title = "Distribución del precio (variable respuesta)",
+       x = "Precio (USD)", y = "Frecuencia") +
+  theme_minimal()
+```
+
+## 11.2 Partición y preprocesamiento
+
+```{r particion-svr}
+set.seed(42)
+
+# Limitar a 2000 registros para que el tuneo de SVR sea computacionalmente viable
+n_max_reg <- 2000
+if (nrow(listings_reg) > n_max_reg) {
+  idx_muestra_reg <- sample(seq_len(nrow(listings_reg)), n_max_reg)
+  listings_reg <- listings_reg[idx_muestra_reg, ]
+}
+
+idx_train_reg <- createDataPartition(listings_reg$price, p = 0.7, list = FALSE)
+train_reg <- listings_reg[idx_train_reg, ]
+test_reg  <- listings_reg[-idx_train_reg, ]
+
+# Codificar variables categóricas con dummies (fullRank evita multicolinealidad)
+dummy_reg <- dummyVars(price ~ ., data = listings_reg, fullRank = TRUE)
+train_reg_dummy <- predict(dummy_reg, newdata = train_reg) |> as.data.frame()
+test_reg_dummy  <- predict(dummy_reg, newdata = test_reg)  |> as.data.frame()
+
+# Limpiar nombres de columnas (espacios -> puntos) para que lm()/rpart() los acepten
+colnames(train_reg_dummy) <- make.names(colnames(train_reg_dummy))
+colnames(test_reg_dummy)  <- make.names(colnames(test_reg_dummy))
+
+# Estandarizar las variables predictoras (SVR es sensible a la escala)
+prep_reg <- preProcess(train_reg_dummy, method = c("center", "scale"))
+train_reg_prep <- cbind(predict(prep_reg, train_reg_dummy),
+                        price = train_reg$price)
+test_reg_prep  <- cbind(predict(prep_reg, test_reg_dummy),
+                        price = test_reg$price)
+
+cat("Train regresión:", nrow(train_reg_prep), "\n")
+cat("Test regresión :", nrow(test_reg_prep), "\n")
+```
+
+## 11.3 Modelos SVR base con diferentes kernels
+
+Antes de tunear, se entrenan tres modelos base con kernels distintos para tener un punto de referencia.
+
+```{r svr-base}
+set.seed(42)
+
+# SVR lineal
+svr_lin <- svm(price ~ ., data = train_reg_prep,
+               kernel = "linear", cost = 1, scale = FALSE)
+
+# SVR radial (kernel por defecto, tipicamente el de mejor desempeño)
+svr_rbf <- svm(price ~ ., data = train_reg_prep,
+               kernel = "radial", cost = 1, gamma = 0.05,
+               scale = FALSE)
+
+# SVR polinomial
+svr_poly <- svm(price ~ ., data = train_reg_prep,
+                kernel = "polynomial", cost = 1,
+                degree = 2, coef0 = 1,
+                scale = FALSE)
+
+cat("Modelos SVR base entrenados.\n")
+```
+
+```{r evaluar-svr-base}
+# Función auxiliar para calcular métricas de regresión
+evaluar_reg <- function(nombre, modelo, train_data, test_data, target = "price") {
+  pred_train <- predict(modelo, newdata = train_data)
+  pred_test  <- predict(modelo, newdata = test_data)
+
+  rmse_train <- sqrt(mean((train_data[[target]] - pred_train)^2))
+  rmse_test  <- sqrt(mean((test_data[[target]]  - pred_test)^2))
+  mae_test   <- mean(abs(test_data[[target]] - pred_test))
+
+  ss_res <- sum((test_data[[target]] - pred_test)^2)
+  ss_tot <- sum((test_data[[target]] - mean(test_data[[target]]))^2)
+  r2_test <- 1 - ss_res / ss_tot
+
+  data.frame(
+    Modelo     = nombre,
+    RMSE_Train = round(rmse_train, 2),
+    RMSE_Test  = round(rmse_test, 2),
+    MAE_Test   = round(mae_test, 2),
+    R2_Test    = round(r2_test, 4),
+    Diferencia = round(rmse_test - rmse_train, 2)
+  )
+}
+
+resultados_svr_base <- rbind(
+  evaluar_reg("SVR Lineal",     svr_lin,  train_reg_prep, test_reg_prep),
+  evaluar_reg("SVR Radial",     svr_rbf,  train_reg_prep, test_reg_prep),
+  evaluar_reg("SVR Polinomial", svr_poly, train_reg_prep, test_reg_prep)
+)
+print(resultados_svr_base)
+```
+
+**Interpretación de los modelos base:** El kernel radial suele ser el más versátil para datos con relaciones no lineales como los precios de Airbnb, donde una variable como `accommodates` puede tener un efecto creciente pero no lineal en el precio. El kernel lineal sirve como línea base; si su desempeño es similar al radial, probablemente las relaciones son aproximadamente lineales en el espacio estandarizado.
+
+## 11.4 Tuneo del modelo SVR
+
+Se utiliza `tune.svm()` con validación cruzada para encontrar la mejor combinación de hiperparámetros del kernel radial. La métrica que minimiza por defecto es el MSE (error cuadrático medio).
+
+```{r tuneo-svr}
+set.seed(42)
+
+# Grilla de búsqueda controlada para evitar tiempos excesivos
+tune_svr <- tune.svm(
+  price ~ .,
+  data    = train_reg_prep,
+  kernel  = "radial",
+  cost    = c(0.1, 1, 10, 100),
+  gamma   = c(0.01, 0.05, 0.1),
+  epsilon = c(0.1, 0.5),
+  tunecontrol = tune.control(cross = 3)
+)
+
+cat("Mejores parámetros encontrados:\n")
+print(tune_svr$best.parameters)
+cat("\nError de validación cruzada (MSE):", tune_svr$best.performance, "\n")
+cat("RMSE de validación cruzada       :", sqrt(tune_svr$best.performance), "\n")
+```
+
+```{r svr-mejor}
+svr_tuneado <- tune_svr$best.model
+summary(svr_tuneado)
+```
+
+**Interpretación del tuneo:** `tune.svm()` evalúa cada combinación de costo, gamma y epsilon mediante validación cruzada de 3 folds y selecciona la que produce el menor error promedio en datos no vistos. El parámetro **epsilon** define el ancho del tubo de tolerancia: errores menores a ε no se penalizan, lo que confiere robustez al modelo frente a ruido en los datos. El parámetro **gamma** controla la flexibilidad de la frontera (radio de influencia de cada vector de soporte) y **cost** regula la penalización por puntos fuera del tubo.
+
+## 11.5 Evaluación del SVR tuneado
+
+```{r evaluar-svr-tuneado}
+metricas_svr_final <- evaluar_reg("SVR Tuneado", svr_tuneado,
+                                  train_reg_prep, test_reg_prep)
+
+# Tabla consolidada con los cuatro modelos SVR
+resultados_svr <- rbind(resultados_svr_base, metricas_svr_final)
+print(resultados_svr)
+```
+
+```{r grafico-svr}
+ggplot(resultados_svr, aes(x = reorder(Modelo, -RMSE_Test),
+                           y = RMSE_Test, fill = Modelo)) +
+  geom_col() +
+  geom_text(aes(label = RMSE_Test), hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(title = "RMSE en prueba por modelo SVR",
+       x = "", y = "RMSE (menor = mejor)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+## 11.6 Análisis visual de predicciones del mejor SVR
+
+```{r predicciones-vs-reales}
+pred_svr_test <- predict(svr_tuneado, newdata = test_reg_prep)
+
+df_pred <- data.frame(
+  Real      = test_reg_prep$price,
+  Predicho  = pred_svr_test,
+  Residuo   = test_reg_prep$price - pred_svr_test
+)
+
+ggplot(df_pred, aes(x = Real, y = Predicho)) +
+  geom_point(alpha = 0.5, color = "#2980b9") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Predicciones del SVR tuneado vs precios reales",
+       x = "Precio real (USD)", y = "Precio predicho (USD)") +
+  theme_minimal()
+
+ggplot(df_pred, aes(x = Predicho, y = Residuo)) +
+  geom_point(alpha = 0.5, color = "#27ae60") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Residuos del SVR tuneado",
+       x = "Valor predicho", y = "Residuo (real - predicho)") +
+  theme_minimal()
+```
+
+**Interpretación de los gráficos:** El gráfico de predichos vs reales muestra qué tan cercanas están las predicciones a la línea ideal y = x. Si los puntos se concentran sobre dicha línea, el modelo predice bien. El gráfico de residuos permite detectar patrones (por ejemplo, mayor error en precios altos), lo que indicaría heterocedasticidad y la necesidad de transformar la variable respuesta (p. ej. con log).
+
+## 11.7 Análisis de sobreajuste del SVR
+
+```{r sobreajuste-svr}
+diagnostico_svr <- resultados_svr %>%
+  mutate(
+    Diagnostico = case_when(
+      Diferencia > (0.10 * RMSE_Train) ~ "Sobreajuste",
+      RMSE_Train > 1.5 * sd(train_reg_prep$price) ~ "Desajuste",
+      TRUE ~ "Buen ajuste"
+    )
+  )
+print(diagnostico_svr[, c("Modelo", "RMSE_Train", "RMSE_Test",
+                          "Diferencia", "Diagnostico")])
+```
+
+En regresión, el sobreajuste se diagnostica comparando el RMSE en entrenamiento contra el RMSE en prueba: si el RMSE_Test es notoriamente mayor que el RMSE_Train (más del 10% relativo), el modelo memorizó patrones de entrenamiento que no generalizan. El SVR tuneado, al haber sido seleccionado por validación cruzada, normalmente presenta una diferencia razonable entre ambos conjuntos.
